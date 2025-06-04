@@ -63,6 +63,28 @@ show_menu() {
     done
 }
 
+# 初始化配置
+init_config() {
+    # 确保配置目录存在
+    if [ ! -d "$CF_ROOT_DIR" ]; then
+        mkdir -p "$CF_ROOT_DIR"
+    fi
+    
+    # 初始化配置文件
+    if [ ! -f "$CF_CONFIG_FILE" ]; then
+        echo "{}" > "$CF_CONFIG_FILE"
+    fi
+    
+    # 创建必要的目录
+    for dir in "$CF_LOGS_DIR" "$CF_TMP_DIR" "$CF_IPS_DIR"; do
+        if [ ! -d "$dir" ]; then
+            mkdir -p "$dir"
+        fi
+    done
+    
+    return 0
+}
+
 # 错误代码
 readonly E_SUCCESS=0      # 成功
 readonly E_FAILED=1       # 一般错误
@@ -390,29 +412,7 @@ upload_to_github() {
     # 检查配置
     if [ -z "$github_token" ] || [ -z "$github_repo" ]; then
         echo -e "${RED}错误：GitHub 配置不完整${NC}"
-        echo -e "${YELLOW}请先配置 GitHub 令牌和仓库名${NC}"
-        return 1
-    fi
-
-    # 检查文件是否存在
-    if [ ! -f "$merged_file" ]; then
-        echo -e "${RED}错误：合并文件不存在${NC}"
-        return 1
-    fi
-
-    # 获取当前文件的 SHA（如果存在）
-    local existing_sha=$(curl -s -H "Authorization: token $github_token" \
-        "https://api.github.com/repos/$github_repo/contents/$github_path" | \
-        jq -r '.sha // ""')
-
-    # 准备上传数据
-    local content=$(base64 "$merged_file" | tr -d '\n')
-    local json_data
-    if [ -n "$existing_sha" ]; then
-        json_data=$(jq -n \
-            --arg message "Update CloudFlare optimized IPs" \
-            --arg content "$content" \
-            --arg branch "$github_branch" \
+        echo -e "${YELLOW}请先配置
             --arg sha "$existing_sha" \
             '{message: $message, content: $content, branch: $branch, sha: $sha}')
     else
@@ -441,13 +441,35 @@ upload_to_github() {
     fi
 }
 
+# 初始化配置
+init_config() {
+    # 确保配置目录存在
+    if [ ! -d "$CF_ROOT_DIR" ]; then
+        mkdir -p "$CF_ROOT_DIR"
+    fi
+    
+    # 初始化配置文件
+    if [ ! -f "$CF_CONFIG_FILE" ]; then
+        echo "{}" > "$CF_CONFIG_FILE"
+    fi
+    
+    # 创建必要的目录
+    for dir in "$CF_LOGS_DIR" "$CF_TMP_DIR" "$CF_IPS_DIR"; do
+        if [ ! -d "$dir" ]; then
+            mkdir -p "$dir"
+        fi
+    done
+    
+    return 0
+}
+
 # 修改全部优选函数
 run_all_optimizations() {
     echo -e "${BLUE}执行全部优选...${NC}"
     
     # 确保配置文件路径正确
-    CF_DIR="/root/cf"  # 确保 CF_DIR 正确设置
-    CONFIG_FILE="$CF_DIR/config.json"  # 使用正确的配置文件路径
+    CF_DIR="$CF_ROOT_DIR"  # 确保 CF_DIR 正确设置
+    CONFIG_FILE="$CF_CONFIG_FILE"  # 使用正确的配置文件路径
     
     echo -e "${BLUE}使用配置文件: $CONFIG_FILE${NC}"
     
@@ -501,7 +523,10 @@ run_all_optimizations() {
     
     echo -e "\n${YELLOW}第二步: CF IPv4 + IPv6 优选${NC}"
     if [ -f "$CF_DIR/cf.sh" ]; then
-        bash "$CF_DIR/cf.sh" --both
+        echo -e "${BLUE}执行 IPv4 优选...${NC}"
+        bash "$CF_DIR/cf.sh" --ipv4
+        echo -e "${BLUE}执行 IPv6 优选...${NC}"
+        bash "$CF_DIR/cf.sh" --ipv6
     else
         echo -e "${RED}错误: 无法找到 cf.sh 文件${NC}"
         return 1
@@ -623,10 +648,10 @@ init_install() {
     
     # 下载所需文件
     local files_to_download=(
-        "https://git.910626.xyz/https://raw.githubusercontent.com/XIU2/CloudflareSpeedTest/master/CloudflareST_linux_amd64|$CF_DIR/cf|binary"
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/locations.json|$CF_DIR/locations.json|text"
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v4.txt|$CF_DIR/ips-v4.txt|text"
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v6.txt|$CF_DIR/ips-v6.txt|text"
+        "https://raw.githubusercontent.com/rdone4425/Cloudflare_vless_trojan/main/cf/${binary_name}|$CF_DIR/cf|binary"
+        "https://raw.githubusercontent.com/rdone4425/Cloudflare_vless_trojan/main/cf/locations.json|$CF_DIR/locations.json|text"
+        "https://raw.githubusercontent.com/rdone4425/Cloudflare_vless_trojan/main/cf/ips-v4.txt|$CF_DIR/ips-v4.txt|text"
+        "https://raw.githubusercontent.com/rdone4425/Cloudflare_vless_trojan/main/cf/ips-v6.txt|$CF_DIR/ips-v6.txt|text"
     )
     
     local success=true
