@@ -22,6 +22,55 @@ readonly E_NOPERM=3       # 权限不足
 readonly E_NETWORK=4      # 网络错误
 readonly E_SPACE=5        # 空间不足
 
+# 显示主菜单
+show_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}CloudFlare IP 优选工具${NC}"
+        echo -e "${YELLOW}------------------------${NC}"
+        echo "1) 执行全部优选"
+        echo "2) 执行 CFNAS IPv4 优选"
+        echo "3) 执行 CFNAS IPv6 优选"
+        echo "4) 执行 CF IPv4 优选"
+        echo "5) 执行 CF IPv6 优选"
+        echo "6) 合并优选结果"
+        echo "7) 上传结果到 GitHub"
+        echo "8) GitHub 配置"
+        echo "9) 查看日志"
+        echo "10) 更新脚本"
+        echo "0) 退出"
+        echo
+        echo -e "${GREEN}请选择 [0-10]: ${NC}"
+        
+        read -r choice
+        case $choice in
+            1)  run_all_optimizations ;;
+            2)  source cfnas.sh && run_optimize "ipv4" ;;
+            3)  source cfnas.sh && run_optimize "ipv6" ;;
+            4)  source cf.sh && run_optimize "ipv4" ;;
+            5)  source cf.sh && run_optimize "ipv6" ;;
+            6)  merge_results ;;
+            7)  upload_to_github ;;
+            8)  configure_github ;;
+            9)  view_logs ;;
+            10) update_scripts ;;
+            0)  exit 0 ;;
+            *)  echo -e "${RED}无效的选项${NC}" ;;
+        esac
+        
+        # 等待用户按回车继续
+        press_enter
+    done
+}
+
+# 错误代码
+readonly E_SUCCESS=0      # 成功
+readonly E_FAILED=1       # 一般错误
+readonly E_NOFILE=2       # 文件不存在
+readonly E_NOPERM=3       # 权限不足
+readonly E_NETWORK=4      # 网络错误
+readonly E_SPACE=5        # 空间不足
+
 # 日志函数
 log() {
     local level=$1
@@ -755,47 +804,6 @@ run_optimize() {
     
     log "ERROR" "优选失败，达到最大重试次数"
     return 1
-}
-
-# 显示主菜单
-show_menu() {
-    while true; do
-        clear
-        echo -e "${BLUE}CloudFlare IP 优选工具${NC}"
-        echo -e "${YELLOW}------------------------${NC}"
-        echo "1) 执行全部优选"
-        echo "2) 执行 CFNAS IPv4 优选"
-        echo "3) 执行 CFNAS IPv6 优选"
-        echo "4) 执行 CF IPv4 优选"
-        echo "5) 执行 CF IPv6 优选"
-        echo "6) 合并优选结果"
-        echo "7) 上传结果到 GitHub"
-        echo "8) GitHub 配置"
-        echo "9) 查看日志"
-        echo "10) 更新脚本"
-        echo "0) 退出"
-        echo
-        echo -e "${GREEN}请选择 [0-10]: ${NC}"
-        
-        read -r choice
-        case $choice in
-            1)  run_all_optimizations ;;
-            2)  source cfnas.sh && run_optimize "ipv4" ;;
-            3)  source cfnas.sh && run_optimize "ipv6" ;;
-            4)  source cf.sh && run_optimize "ipv4" ;;
-            5)  source cf.sh && run_optimize "ipv6" ;;
-            6)  merge_results ;;
-            7)  upload_to_github ;;
-            8)  configure_github ;;
-            9)  view_logs ;;
-            10) update_scripts ;;
-            0)  exit 0 ;;
-            *)  echo -e "${RED}无效的选项${NC}" ;;
-        esac
-        
-        # 等待用户按回车继续
-        press_enter
-    done
 }
 
 # 主函数
