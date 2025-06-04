@@ -366,6 +366,152 @@ run_all_optimizations() {
     fi
 }
 
+# 验证文件完整性
+verify_file() {
+    local file="$1"
+    local expected_type="$2"
+    
+    if [ ! -f "$file" ]; then
+        log "ERROR" "文件不存在: $file"
+        return 1
+    fi
+    
+    # 检查文件大小
+    local size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+    if [ "$size" -lt 1000 ]; then # 文件小于1KB可能是错误页面
+        log "ERROR" "文件大小异常: $file ($size bytes)"
+        rm -f "$file"
+        return 1
+    fi
+    
+    # 检查是否为二进制文件
+    if [ "$expected_type" = "binary" ]; then
+        if file "$file" | grep -q "text"; then
+            log "ERROR" "预期为二进制文件，但检测到文本文件: $file"
+            rm -f "$file"
+            return 1
+        fi
+    elif [ "$expected_type" = "text" ]; then
+        if ! file "$file" | grep -q "text"; then
+            log "ERROR" "预期为文本文件，但检测到二进制文件: $file"
+            rm -f "$file"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# 下载文件的通用函数
+download_file() {
+    local url="$1"
+    local output="$2"
+    local backup_url="$3"
+    local expected_type="$4"
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        log "INFO" "下载文件: $output (尝试 $((retry_count + 1))/$max_retries)"
+        
+        # 尝试主地址
+        if curl -sSLf --connect-timeout 30 "$url" -o "$output"; then
+            if verify_file "$output" "$expected_type"; then
+                log "INFO" "文件下载成功: $output"
+                return 0
+            fi
+        fi
+        
+        # 如果有备用地址，尝试备用地址
+        if [ -n "$backup_url" ]; then
+            log "WARN" "主地址下载失败，尝试备用地址"
+            if curl -sSLf --connect-timeout 30 "$backup_url" -o "$output"; then
+                if verify_file "$output" "$expected_type"; then
+                    log "INFO" "文件从备用地址下载成功: $output"
+                    return 0
+                fi
+            fi
+        fi
+        
+        ((retry_count++))
+        if [ $retry_count -lt $max_retries ]; then
+            local wait_time=$((3 * retry_count))
+            log "WARN" "下载失败，等待 ${wait_time} 秒后重试..."
+            sleep "$wait_time"
+        fi
+    done
+    
+    log "ERROR" "文件下载失败: $output"
+    return 1
+}
+
+# 初始化安装
+init_install() {
+    log "INFO" "开始初始化安装..."
+    
+    # 检测系统架构
+    local arch=$(uname -m)
+    local cf_binary="cf-amd64"
+    case "$arch" in
+        x86_64|amd64)
+            cf_binary="cf-amd64"
+            ;;
+        aarch64|arm64)
+            cf_binary="cf-arm64"
+            ;;
+        *)
+            log "ERROR" "不支持的系统架构: $arch"
+            return 1
+            ;;
+    esac
+    log "INFO" "检测到系统架构: $arch, 将使用 $cf_binary"
+    
+    # 创建必要的目录
+    mkdir -p "$CF_DIR/ips"
+    
+    # 下载所需文件
+    local files_to_download=(
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/$cf_binary|$CF_DIR/cf|binary"
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/locations.json|$CF_DIR/locations.json|text"
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v4.txt|$CF_DIR/ips-v4.txt|text"
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v6.txt|$CF_DIR/ips-v6.txt|text"
+    )
+    
+    local success=true
+    for file_info in "${files_to_download[@]}"; do
+        IFS='|' read -r url output type <<< "$file_info"
+        
+        # 备用下载地址
+        local backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/$(basename "$url")"
+        
+        if [ -f "$output" ]; then
+            if verify_file "$output" "$type"; then
+                log "INFO" "文件已存在且完整: $(basename "$output"), 跳过下载"
+                continue
+            else
+                log "WARN" "现有文件可能损坏，重新下载: $(basename "$output")"
+                rm -f "$output"
+            fi
+        fi
+        
+        if ! download_file "$url" "$output" "$backup_url" "$type"; then
+            success=false
+            break
+        fi
+        
+        if [ "$type" = "binary" ]; then
+            chmod +x "$output"
+        fi
+    done
+    
+    if [ "$success" = true ]; then
+        log "INFO" "初始化安装完成"
+        return 0
+    else
+        log "ERROR" "初始化安装失败"
+        return 1
+    fi
+}
 # 更新配置
 update_config() {
     local key=$1
@@ -656,3 +802,100 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
+
+# 执行优选
+run_optimize() {
+    local mode="$1"
+    local cf_binary="$CF_DIR/cf"
+    
+    # 验证必要文件
+    local required_files=("$cf_binary" "$CF_DIR/locations.json")
+    case "$mode" in
+        "ipv4"|"both")
+            required_files+=("$CF_DIR/ips-v4.txt")
+            ;;
+        "ipv6"|"both")
+            required_files+=("$CF_DIR/ips-v6.txt")
+            ;;
+    esac
+    
+    for file in "${required_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            log "ERROR" "缺少必要文件: $file"
+            return 1
+        fi
+        
+        if [ ! -r "$file" ]; then
+            log "ERROR" "文件无读取权限: $file"
+            return 1
+        fi
+    done
+    
+    # 验证可执行文件
+    if [ ! -x "$cf_binary" ]; then
+        log "WARN" "修复 cf 可执行权限"
+        chmod +x "$cf_binary"
+    fi
+    
+    # 创建输出目录
+    local output_dir="$CF_DIR/ips"
+    mkdir -p "$output_dir"
+    
+    # 设置优选参数
+    local timeout=5
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        case "$mode" in
+            "ipv4")
+                log "INFO" "开始 IPv4 优选..."
+                if "$cf_binary" --ipv4 -o "$output_dir/cfnas_ipv4.txt" -t "$timeout"; then
+                    log "INFO" "IPv4 优选完成"
+                    return 0
+                fi
+                ;;
+            "ipv6")
+                log "INFO" "开始 IPv6 优选..."
+                if "$cf_binary" --ipv6 -o "$output_dir/cfnas_ipv6.txt" -t "$timeout"; then
+                    log "INFO" "IPv6 优选完成"
+                    return 0
+                fi
+                ;;
+            "both")
+                log "INFO" "开始 IPv4 优选..."
+                if ! "$cf_binary" --ipv4 -o "$output_dir/cfnas_ipv4.txt" -t "$timeout"; then
+                    log "ERROR" "IPv4 优选失败"
+                else
+                    log "INFO" "IPv4 优选完成"
+                fi
+                
+                log "INFO" "开始 IPv6 优选..."
+                if ! "$cf_binary" --ipv6 -o "$output_dir/cfnas_ipv6.txt" -t "$timeout"; then
+                    log "ERROR" "IPv6 优选失败"
+                else
+                    log "INFO" "IPv6 优选完成"
+                fi
+                
+                # 只要有一个成功就返回成功
+                if [ -s "$output_dir/cfnas_ipv4.txt" ] || [ -s "$output_dir/cfnas_ipv6.txt" ]; then
+                    return 0
+                fi
+                ;;
+            *)
+                log "ERROR" "无效的优选模式: $mode"
+                return 1
+                ;;
+        esac
+        
+        ((retry_count++))
+        if [ $retry_count -lt $max_retries ]; then
+            local wait_time=$((5 * retry_count))
+            log "WARN" "优选失败，等待 ${wait_time} 秒后重试..."
+            sleep "$wait_time"
+        fi
+    done
+    
+    log "ERROR" "优选失败，达到最大重试次数"
+    return 1
+}
