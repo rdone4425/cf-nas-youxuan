@@ -51,6 +51,23 @@ log() {
 # 下载或更新 cfnas.sh
 download_cfnas() {
     log "INFO" "开始下载 cfnas.sh..."
+    
+    # 确保临时目录存在
+    TMP_DIR="/tmp/cf_download"
+    mkdir -p "$TMP_DIR"
+    
+    # 设置临时文件路径
+    TMP_FILE="$TMP_DIR/cfnas.sh.tmp"
+    CF_TMP_FILE="$TMP_DIR/cf.sh.tmp"
+    
+    # 确保目标目录存在且有写入权限
+    if [ ! -d "$CF_DIR" ]; then
+        mkdir -p "$CF_DIR" || {
+            echo -e "${RED}错误：无法创建目录 $CF_DIR${NC}"
+            return 1
+        }
+    fi
+    
     # 添加重试机制
     local max_retries=3
     local retry_count=0
@@ -64,14 +81,19 @@ download_cfnas() {
     local cf_backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cf.sh"
     
     while [ $retry_count -lt $max_retries ]; do
-        # 尝试直接下载 cfnas.sh
+        echo -e "${BLUE}尝试下载 cfnas.sh (尝试 $((retry_count + 1))/$max_retries)${NC}"
+        
+        # 尝试从所有可用源下载
         if curl -sSL --connect-timeout 10 "$cfnas_url" -o "$TMP_FILE" || \
            curl -sSL --connect-timeout 10 "$cfnas_backup_url" -o "$TMP_FILE"; then
             
             if [ -s "$TMP_FILE" ] && grep -q "#!/bin/bash" "$TMP_FILE"; then
+                # 确保文件以换行符结尾
                 echo "" >> "$TMP_FILE"
                 convert_line_endings "$TMP_FILE"
-                mv "$TMP_FILE" "$CF_DIR/cfnas.sh"
+                
+                # 使用 cat 而不是 mv 来确保权限问题
+                cat "$TMP_FILE" > "$CF_DIR/cfnas.sh"
                 chmod +x "$CF_DIR/cfnas.sh"
                 log "INFO" "cfnas.sh 下载成功"
                 
@@ -83,31 +105,30 @@ download_cfnas() {
                     if [ -s "$CF_TMP_FILE" ] && grep -q "#!/bin/bash" "$CF_TMP_FILE"; then
                         echo "" >> "$CF_TMP_FILE"
                         convert_line_endings "$CF_TMP_FILE"
-                        mv "$CF_TMP_FILE" "$CF_DIR/cf.sh"
+                        cat "$CF_TMP_FILE" > "$CF_DIR/cf.sh"
                         chmod +x "$CF_DIR/cf.sh"
                         echo -e "${GREEN}cf.sh 下载成功${NC}"
+                        
+                        # 清理临时文件
+                        rm -f "$TMP_FILE" "$CF_TMP_FILE"
                         return 0
-                    else
-                        rm -f "$CF_TMP_FILE"
-                        echo -e "${RED}下载的 cf.sh 文件不完整或格式错误${NC}"
                     fi
-                else
-                    rm -f "$CF_TMP_FILE"
-                    echo -e "${RED}cf.sh 下载失败${NC}"
                 fi
+                echo -e "${RED}下载 cf.sh 失败或文件无效${NC}"
             else
-                rm -f "$TMP_FILE"
                 echo -e "${RED}下载的 cfnas.sh 文件不完整或格式错误${NC}"
             fi
         fi
         
         ((retry_count++))
         if [ $retry_count -lt $max_retries ]; then
-            echo -e "${YELLOW}下载失败，等待重试 ($retry_count/$max_retries)...${NC}"
-            sleep 2
+            echo -e "${YELLOW}下载失败，等待重试...${NC}"
+            sleep 3
         fi
     done
     
+    # 清理临时文件
+    rm -f "$TMP_FILE" "$CF_TMP_FILE"
     echo -e "${RED}达到最大重试次数，下载失败${NC}"
     return 1
 }
@@ -375,8 +396,42 @@ press_enter() {
     read
 }
 
+# 初始化函数
+init_environment() {
+    # 设置工作目录
+    if [ "$EUID" -eq 0 ]; then
+        CF_DIR="/root/cf"
+    else
+        CF_DIR="$HOME/cf"
+    fi
+    
+    # 创建必要的目录
+    mkdir -p "$CF_DIR"
+    mkdir -p "$CF_DIR/ips"
+    
+    # 设置配置文件路径
+    CONFIG_FILE="$CF_DIR/config.json"
+    
+    # 初始化配置文件
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "{}" > "$CONFIG_FILE"
+    fi
+    
+    # 设置日志目录
+    mkdir -p "$CF_DIR/logs"
+    
+    # 验证目录权限
+    if [ ! -w "$CF_DIR" ]; then
+        echo -e "${RED}错误：没有目录写入权限 $CF_DIR${NC}"
+        exit 1
+    fi
+}
+
 # 主函数
 main() {
+    # 初始化环境
+    init_environment
+
     # 创建 cf 目录
     CF_DIR="/root/cf"
     if [ ! -d "$CF_DIR" ]; then
