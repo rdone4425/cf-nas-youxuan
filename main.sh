@@ -1,19 +1,66 @@
 #!/bin/bash
 
+# 基础配置
+export CF_ROOT_DIR="/root/cf"                      # 根目录
+export CF_CONFIG_FILE="$CF_ROOT_DIR/config.json"   # 配置文件
+export CF_LOGS_DIR="$CF_ROOT_DIR/logs"            # 日志目录
+export CF_TMP_DIR="$CF_ROOT_DIR/tmp"              # 临时目录
+export CF_IPS_DIR="$CF_ROOT_DIR/ips"             # IP列表目录
+
 # 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+export RED='\033[0;31m'
+export GREEN='\033[0;32m'
+export YELLOW='\033[1;33m'
+export BLUE='\033[0;34m'
+export NC='\033[0m'
 
-# 配置文件路径
-CONFIG_FILE="$CF_DIR/config.json"
+# 错误代码
+readonly E_SUCCESS=0      # 成功
+readonly E_FAILED=1       # 一般错误
+readonly E_NOFILE=2       # 文件不存在
+readonly E_NOPERM=3       # 权限不足
+readonly E_NETWORK=4      # 网络错误
+readonly E_SPACE=5        # 空间不足
 
-# 清理日志函数
-clean_log() {
-    # 如果需要清理日志，在这里实现
-    :
+# 日志函数
+log() {
+    local level=$1
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${timestamp} [${level}] ${message}" >> "${CF_LOGS_DIR}/main.log"
+    
+    # 同时输出到控制台
+    case $level in
+        ERROR) echo -e "${RED}${message}${NC}" ;;
+        WARN)  echo -e "${YELLOW}${message}${NC}" ;;
+        INFO)  echo -e "${GREEN}${message}${NC}" ;;
+        DEBUG) echo -e "${BLUE}${message}${NC}" ;;
+    esac
+}
+
+# 环境初始化
+init_environment() {
+    # 创建必要的目录
+    for dir in "$CF_ROOT_DIR" "$CF_LOGS_DIR" "$CF_TMP_DIR" "$CF_IPS_DIR"; do
+        if ! mkdir -p "$dir" 2>/dev/null; then
+            echo -e "${RED}错误: 无法创建目录 $dir${NC}"
+            exit $E_NOPERM
+        fi
+    done
+    
+    # 初始化配置文件
+    if [ ! -f "$CF_CONFIG_FILE" ]; then
+        echo "{}" > "$CF_CONFIG_FILE"
+    fi
+    
+    # 验证目录权限
+    for dir in "$CF_ROOT_DIR" "$CF_LOGS_DIR" "$CF_TMP_DIR" "$CF_IPS_DIR"; do
+        if [ ! -w "$dir" ]; then
+            echo -e "${RED}错误: 目录无写入权限 $dir${NC}"
+            exit $E_NOPERM
+        fi
+    done
 }
 
 # 转换文件换行符
@@ -33,21 +80,83 @@ convert_line_endings() {
     fi
 }
 
-# 添加日志函数
-log() {
-    local level=$1
-    shift
-    local message="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${timestamp} [${level}] ${message}" >> "${CF_DIR}/main.log"
+# 下载文件的通用函数
+download_file() {
+    local url="$1"
+    local output="$2"
+    local backup_url="$3"
+    local expected_type="$4"
+    local max_retries=3
+    local retry_count=0
     
-    # 同时输出到控制台
-    case $level in
-        ERROR) echo -e "${RED}${message}${NC}" ;;
-        WARN)  echo -e "${YELLOW}${message}${NC}" ;;
-        INFO)  echo -e "${GREEN}${message}${NC}" ;;
-        DEBUG) echo -e "${BLUE}${message}${NC}" ;;
-    esac
+    while [ $retry_count -lt $max_retries ]; do
+        log "INFO" "下载文件: $output (尝试 $((retry_count + 1))/$max_retries)"
+        
+        # 尝试主地址
+        if curl -sSLf --connect-timeout 30 "$url" -o "$output"; then
+            if verify_file "$output" "$expected_type"; then
+                log "INFO" "文件下载成功: $output"
+                return 0
+            fi
+        fi
+        
+        # 如果有备用地址，尝试备用地址
+        if [ -n "$backup_url" ]; then
+            log "WARN" "主地址下载失败，尝试备用地址"
+            if curl -sSLf --connect-timeout 30 "$backup_url" -o "$output"; then
+                if verify_file "$output" "$expected_type"; then
+                    log "INFO" "文件从备用地址下载成功: $output"
+                    return 0
+                fi
+            fi
+        fi
+        
+        ((retry_count++))
+        if [ $retry_count -lt $max_retries ]; then
+            local wait_time=$((3 * retry_count))
+            log "WARN" "下载失败，等待 ${wait_time} 秒后重试..."
+            sleep "$wait_time"
+        fi
+    done
+    
+    log "ERROR" "文件下载失败: $output"
+    return 1
+}
+
+# 验证文件完整性
+verify_file() {
+    local file="$1"
+    local expected_type="$2"
+    
+    if [ ! -f "$file" ]; then
+        log "ERROR" "文件不存在: $file"
+        return 1
+    fi
+    
+    # 检查文件大小
+    local size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+    if [ "$size" -lt 1000 ]; then # 文件小于1KB可能是错误页面
+        log "ERROR" "文件大小异常: $file ($size bytes)"
+        rm -f "$file"
+        return 1
+    fi
+    
+    # 检查是否为二进制文件
+    if [ "$expected_type" = "binary" ]; then
+        if file "$file" | grep -q "text"; then
+            log "ERROR" "预期为二进制文件，但检测到文本文件: $file"
+            rm -f "$file"
+            return 1
+        fi
+    elif [ "$expected_type" = "text" ]; then
+        if ! file "$file" | grep -q "text"; then
+            log "ERROR" "预期为文本文件，但检测到二进制文件: $file"
+            rm -f "$file"
+            return 1
+        fi
+    fi
+    
+    return 0
 }
 
 # 下载或更新 cfnas.sh
@@ -366,152 +475,6 @@ run_all_optimizations() {
     fi
 }
 
-# 验证文件完整性
-verify_file() {
-    local file="$1"
-    local expected_type="$2"
-    
-    if [ ! -f "$file" ]; then
-        log "ERROR" "文件不存在: $file"
-        return 1
-    fi
-    
-    # 检查文件大小
-    local size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
-    if [ "$size" -lt 1000 ]; then # 文件小于1KB可能是错误页面
-        log "ERROR" "文件大小异常: $file ($size bytes)"
-        rm -f "$file"
-        return 1
-    fi
-    
-    # 检查是否为二进制文件
-    if [ "$expected_type" = "binary" ]; then
-        if file "$file" | grep -q "text"; then
-            log "ERROR" "预期为二进制文件，但检测到文本文件: $file"
-            rm -f "$file"
-            return 1
-        fi
-    elif [ "$expected_type" = "text" ]; then
-        if ! file "$file" | grep -q "text"; then
-            log "ERROR" "预期为文本文件，但检测到二进制文件: $file"
-            rm -f "$file"
-            return 1
-        fi
-    fi
-    
-    return 0
-}
-
-# 下载文件的通用函数
-download_file() {
-    local url="$1"
-    local output="$2"
-    local backup_url="$3"
-    local expected_type="$4"
-    local max_retries=3
-    local retry_count=0
-    
-    while [ $retry_count -lt $max_retries ]; do
-        log "INFO" "下载文件: $output (尝试 $((retry_count + 1))/$max_retries)"
-        
-        # 尝试主地址
-        if curl -sSLf --connect-timeout 30 "$url" -o "$output"; then
-            if verify_file "$output" "$expected_type"; then
-                log "INFO" "文件下载成功: $output"
-                return 0
-            fi
-        fi
-        
-        # 如果有备用地址，尝试备用地址
-        if [ -n "$backup_url" ]; then
-            log "WARN" "主地址下载失败，尝试备用地址"
-            if curl -sSLf --connect-timeout 30 "$backup_url" -o "$output"; then
-                if verify_file "$output" "$expected_type"; then
-                    log "INFO" "文件从备用地址下载成功: $output"
-                    return 0
-                fi
-            fi
-        fi
-        
-        ((retry_count++))
-        if [ $retry_count -lt $max_retries ]; then
-            local wait_time=$((3 * retry_count))
-            log "WARN" "下载失败，等待 ${wait_time} 秒后重试..."
-            sleep "$wait_time"
-        fi
-    done
-    
-    log "ERROR" "文件下载失败: $output"
-    return 1
-}
-
-# 初始化安装
-init_install() {
-    log "INFO" "开始初始化安装..."
-    
-    # 检测系统架构
-    local arch=$(uname -m)
-    local cf_binary="cf-amd64"
-    case "$arch" in
-        x86_64|amd64)
-            cf_binary="cf-amd64"
-            ;;
-        aarch64|arm64)
-            cf_binary="cf-arm64"
-            ;;
-        *)
-            log "ERROR" "不支持的系统架构: $arch"
-            return 1
-            ;;
-    esac
-    log "INFO" "检测到系统架构: $arch, 将使用 $cf_binary"
-    
-    # 创建必要的目录
-    mkdir -p "$CF_DIR/ips"
-    
-    # 下载所需文件
-    local files_to_download=(
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/$cf_binary|$CF_DIR/cf|binary"
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/locations.json|$CF_DIR/locations.json|text"
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v4.txt|$CF_DIR/ips-v4.txt|text"
-        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v6.txt|$CF_DIR/ips-v6.txt|text"
-    )
-    
-    local success=true
-    for file_info in "${files_to_download[@]}"; do
-        IFS='|' read -r url output type <<< "$file_info"
-        
-        # 备用下载地址
-        local backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/$(basename "$url")"
-        
-        if [ -f "$output" ]; then
-            if verify_file "$output" "$type"; then
-                log "INFO" "文件已存在且完整: $(basename "$output"), 跳过下载"
-                continue
-            else
-                log "WARN" "现有文件可能损坏，重新下载: $(basename "$output")"
-                rm -f "$output"
-            fi
-        fi
-        
-        if ! download_file "$url" "$output" "$backup_url" "$type"; then
-            success=false
-            break
-        fi
-        
-        if [ "$type" = "binary" ]; then
-            chmod +x "$output"
-        fi
-    done
-    
-    if [ "$success" = true ]; then
-        log "INFO" "初始化安装完成"
-        return 0
-    else
-        log "ERROR" "初始化安装失败"
-        return 1
-    fi
-}
 # 更新配置
 update_config() {
     local key=$1
@@ -585,223 +548,117 @@ press_enter() {
     read
 }
 
-# 初始化函数
-init_environment() {
-    # 设置工作目录
-    if [ "$EUID" -eq 0 ]; then
-        CF_DIR="/root/cf"
-    else
-        CF_DIR="$HOME/cf"
-    fi
+# 初始化安装
+init_install() {
+    log "INFO" "开始初始化安装..."
     
-    # 创建必要的目录
-    mkdir -p "$CF_DIR"
-    mkdir -p "$CF_DIR/ips"
-    
-    # 设置配置文件路径
-    CONFIG_FILE="$CF_DIR/config.json"
-    
-    # 初始化配置文件
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "{}" > "$CONFIG_FILE"
-    fi
-    
-    # 设置日志目录
-    mkdir -p "$CF_DIR/logs"
-    
-    # 验证目录权限
-    if [ ! -w "$CF_DIR" ]; then
-        echo -e "${RED}错误：没有目录写入权限 $CF_DIR${NC}"
-        exit 1
-    fi
-}
-
-# 主函数
-main() {
-    # 初始化环境
-    init_environment
-
-    # 创建 cf 目录
-    CF_DIR="/root/cf"
-    if [ ! -d "$CF_DIR" ]; then
-        echo -e "${BLUE}创建 cf 目录...${NC}"
-        mkdir -p "$CF_DIR"
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}cf 目录创建成功${NC}"
-        else
-            echo -e "${RED}cf 目录创建失败${NC}"
-            exit 1
-        fi
-    fi
-
-    # 初始化配置文件
-    CONFIG_FILE="$CF_DIR/config.json"
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${BLUE}创建配置文件...${NC}"
-        echo "{}" > "$CONFIG_FILE"
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}配置文件创建成功${NC}"
-        else
-            echo -e "${RED}配置文件创建失败${NC}"
-            exit 1
-        fi
-    fi
-
-    # 处理命令行参数
-    case "$1" in
-        "--update")
-            echo -e "${BLUE}更新模式${NC}"
-            FORCE_UPDATE=true
+    # 检测系统架构
+    local arch=$(uname -m)
+    local cf_binary="cf-amd64"
+    case "$arch" in
+        x86_64|amd64)
+            cf_binary="cf-amd64"
             ;;
-        "--ipv4")
-            echo -e "${BLUE}IPv4 优选模式${NC}"
-            source "$CF_DIR/cfnas.sh"
-            init_config
-            init_install
-            run_optimize "ipv4"
-            ;;
-        "--ipv6")
-            echo -e "${BLUE}IPv6 优选模式${NC}"
-            source "$CF_DIR/cfnas.sh"
-            init_config
-            init_install
-            run_optimize "ipv6"
-            ;;
-        "--all")
-            run_all_optimizations
+        aarch64|arm64)
+            cf_binary="cf-arm64"
             ;;
         *)
-            # 主菜单部分
-            while true; do
-                clear
-                echo -e "${YELLOW}请选择操作模式:${NC}"
-                echo -e "1. ${GREEN}CFNAS IPv4 优选${NC}"
-                echo -e "2. ${GREEN}CFNAS IPv6 优选${NC}"
-                echo -e "3. ${GREEN}全部优选 (CFNAS + CF)${NC}"
-                echo -e "4. ${GREEN}CF IPv4 优选${NC}"
-                echo -e "5. ${GREEN}CF IPv6 优选${NC}"
-                echo -e "6. ${GREEN}更新脚本${NC}"
-                echo -e "7. ${GREEN}进入 CFNAS 菜单${NC}"
-                echo -e "8. ${GREEN}上传结果到 GitHub${NC}"
-                echo -e "9. ${GREEN}配置 GitHub${NC}"
-                echo -e "0. ${RED}退出${NC}"
-                read -p "请输入选项 [0-9]: " choice
-                
-                case $choice in
-                    1)
-                        if [ ! -f "$CF_DIR/cfnas.sh" ]; then
-                            echo -e "${YELLOW}cfnas.sh 不存在，正在下载...${NC}"
-                            download_cfnas
-                        fi
-                        
-                        echo -e "${BLUE}正在处理文件格式...${NC}"
-                        tr -d '\r' < "$CF_DIR/cfnas.sh" > "$CF_DIR/cfnas.sh.tmp"
-                        mv "$CF_DIR/cfnas.sh.tmp" "$CF_DIR/cfnas.sh"
-                        chmod +x "$CF_DIR/cfnas.sh"
-                        
-                        if [ -f "$CF_DIR/cfnas.sh" ]; then
-                            source "$CF_DIR/cfnas.sh"
-                            init_config
-                            init_install
-                            run_optimize "ipv4"
-                        else
-                            echo -e "${RED}错误: 无法找到 cfnas.sh 文件${NC}"
-                            exit 1
-                        fi
-                        read -p "按回车键继续..."
-                        ;;
-                    2)
-                        if [ ! -f "$CF_DIR/cfnas.sh" ]; then
-                            echo -e "${YELLOW}cfnas.sh 不存在，正在下载...${NC}"
-                            download_cfnas
-                        fi
-                        
-                        echo -e "${BLUE}正在处理文件格式...${NC}"
-                        tr -d '\r' < "$CF_DIR/cfnas.sh" > "$CF_DIR/cfnas.sh.tmp"
-                        mv "$CF_DIR/cfnas.sh.tmp" "$CF_DIR/cfnas.sh"
-                        chmod +x "$CF_DIR/cfnas.sh"
-                        
-                        if [ -f "$CF_DIR/cfnas.sh" ]; then
-                            source "$CF_DIR/cfnas.sh"
-                            init_config
-                            init_install
-                            run_optimize "ipv6"
-                        else
-                            echo -e "${RED}错误: 无法找到 cfnas.sh 文件${NC}"
-                            exit 1
-                        fi
-                        read -p "按回车键继续..."
-                        ;;
-                    3)
-                        run_all_optimizations
-                        read -p "按回车键继续..."
-                        ;;
-                    4)
-                        if [ ! -f "$CF_DIR/cf.sh" ]; then
-                            echo -e "${YELLOW}cf.sh 不存在，正在下载...${NC}"
-                            download_cfnas
-                        fi
-                        
-                        echo -e "${BLUE}正在处理文件格式...${NC}"
-                        tr -d '\r' < "$CF_DIR/cf.sh" > "$CF_DIR/cf.sh.tmp"
-                        mv "$CF_DIR/cf.sh.tmp" "$CF_DIR/cf.sh"
-                        chmod +x "$CF_DIR/cf.sh"
-                        
-                        if [ -f "$CF_DIR/cf.sh" ]; then
-                            bash "$CF_DIR/cf.sh" --ipv4
-                        else
-                            echo -e "${RED}错误: 无法找到 cf.sh 文件${NC}"
-                            exit 1
-                        fi
-                        ;;
-                    5)
-                        if [ ! -f "$CF_DIR/cf.sh" ]; then
-                            echo -e "${YELLOW}cf.sh 不存在，正在下载...${NC}"
-                            download_cfnas
-                        fi
-                        
-                        echo -e "${BLUE}正在处理文件格式...${NC}"
-                        tr -d '\r' < "$CF_DIR/cf.sh" > "$CF_DIR/cf.sh.tmp"
-                        mv "$CF_DIR/cf.sh.tmp" "$CF_DIR/cf.sh"
-                        chmod +x "$CF_DIR/cf.sh"
-                        
-                        if [ -f "$CF_DIR/cf.sh" ]; then
-                            bash "$CF_DIR/cf.sh" --ipv6
-                        else
-                            echo -e "${RED}错误: 无法找到 cf.sh 文件${NC}"
-                            exit 1
-                        fi
-                        ;;
-                    6)
-                        FORCE_UPDATE=true
-                        ;;
-                    7)
-                        bash cfnas.sh
-                        ;;
-                    8)
-                        upload_to_github
-                        read -p "按回车键继续..."
-                        ;;
-                    9)
-                        configure_github
-                        ;;
-                    0)
-                        exit 0
-                        ;;
-                    *)
-                        echo -e "${RED}无效选项${NC}"
-                        read -p "按回车键继续..."
-                        ;;
-                esac
-            done
+            log "ERROR" "不支持的系统架构: $arch"
+            return 1
             ;;
     esac
+    log "INFO" "检测到系统架构: $arch, 将使用 $cf_binary"
+    
+    # 创建必要的目录
+    mkdir -p "$CF_DIR/ips"
+    
+    # 下载所需文件
+    local files_to_download=(
+        "https://git.910626.xyz/https://raw.githubusercontent.com/XIU2/CloudflareSpeedTest/master/CloudflareST_linux_amd64|$CF_DIR/cf|binary"
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/locations.json|$CF_DIR/locations.json|text"
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v4.txt|$CF_DIR/ips-v4.txt|text"
+        "https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/ips-v6.txt|$CF_DIR/ips-v6.txt|text"
+    )
+    
+    local success=true
+    for file_info in "${files_to_download[@]}"; do
+        IFS='|' read -r url output type <<< "$file_info"
+        
+        # 备用下载地址
+        local backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/files/$(basename "$url")"
+        
+        if [ -f "$output" ]; then
+            if verify_file "$output" "$type"; then
+                log "INFO" "文件已存在且完整: $(basename "$output"), 跳过下载"
+                continue
+            else
+                log "WARN" "现有文件可能损坏，重新下载: $(basename "$output")"
+                rm -f "$output"
+            fi
+        fi
+        
+        if ! download_file "$url" "$output" "$backup_url" "$type"; then
+            success=false
+            break
+        fi
+        
+        if [ "$type" = "binary" ]; then
+            chmod +x "$output"
+        fi
+    done
+    
+    if [ "$success" = true ]; then
+        log "INFO" "初始化安装完成"
+        return 0
+    else
+        log "ERROR" "初始化安装失败"
+        return 1
+    fi
 }
 
-# 如果直接运行此脚本，则执行主函数
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
+# 更新脚本
+update_scripts() {
+    echo -e "${BLUE}正在更新脚本...${NC}"
+    
+    # 下载最新的 main.sh
+    local script_url="https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/main.sh"
+    local script_backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/main.sh"
+    local tmp_script="/tmp/main.sh.tmp.$$"
+    
+    # 清理旧的临时文件
+    trap 'rm -f "$tmp_script"' EXIT
+    
+    # 下载脚本
+    if curl -sSLf "$script_url" -o "$tmp_script" || curl -sSLf "$script_backup_url" -o "$tmp_script"; then
+        # 验证下载的文件
+        if [ -s "$tmp_script" ] && head -n1 "$tmp_script" | grep -q "#!/bin/bash"; then
+            # 确保文件以换行符结尾
+            echo "" >> "$tmp_script"
+            convert_line_endings "$tmp_script"
+            
+            # 安全地移动文件
+            if cp "$tmp_script" "$0" && chmod +x "$0"; then
+                echo -e "${GREEN}脚本更新成功，请重新运行脚本${NC}"
+                exit 0
+            else
+                echo -e "${RED}无法保存更新的脚本${NC}"
+            fi
+        else
+            echo -e "${RED}下载的脚本文件不完整或格式错误${NC}"
+        fi
+    else
+        echo -e "${RED}下载脚本失败${NC}"
+    fi
+    
+    return 1
+}
+
+# 查看日志
+view_logs() {
+    echo -e "${BLUE}日志文件: ${CF_LOGS_DIR}/main.log${NC}"
+    echo -e "${BLUE}最新日志内容:${NC}"
+    tail -n 20 "${CF_LOGS_DIR}/main.log"
+}
 
 # 执行优选
 run_optimize() {
@@ -899,3 +756,23 @@ run_optimize() {
     log "ERROR" "优选失败，达到最大重试次数"
     return 1
 }
+
+# 主函数
+main() {
+    # 初始化环境
+    init_environment
+    
+    # 处理命令行参数
+    case "$1" in
+        "--ipv4")   source cfnas.sh && run_optimize "ipv4" ;;
+        "--ipv6")   source cfnas.sh && run_optimize "ipv6" ;;
+        "--all")    run_all_optimizations ;;
+        "--update") update_scripts ;;
+        *)          show_menu ;;
+    esac
+}
+
+# 程序入口
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
