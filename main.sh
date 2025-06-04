@@ -18,16 +18,18 @@ clean_log() {
 
 # 转换文件换行符
 convert_line_endings() {
-    local file=$1
-    if [ -f "$file" ]; then
-        # 使用 sed 命令删除 \r 字符
-        echo -e "${BLUE}转换文件换行符...${NC}"
-        sed -i 's/\r$//' "$file"
-        # 使用 dos2unix（如果可用）作为备选方案
-        if command -v dos2unix >/dev/null 2>&1; then
-            dos2unix "$file" >/dev/null 2>&1
+    local file="$1"
+    if command -v dos2unix &> /dev/null; then
+        dos2unix "$file" 2>/dev/null || true
+    else
+        # 如果没有 dos2unix，使用 sed 进行转换
+        local tmp_file="${file}.tmp"
+        if sed 's/\r$//' "$file" > "$tmp_file"; then
+            mv "$tmp_file" "$file"
+        else
+            rm -f "$tmp_file"
+            log "WARN" "无法转换行尾格式，继续执行"
         fi
-        echo -e "${GREEN}换行符转换完成${NC}"
     fi
 }
 
@@ -52,84 +54,125 @@ log() {
 download_cfnas() {
     log "INFO" "开始下载 cfnas.sh..."
     
-    # 确保临时目录存在
+    # 检查curl命令是否可用
+    if ! command -v curl &> /dev/null; then
+        log "ERROR" "curl 命令未安装，请先安装 curl"
+        return 1
+    fi
+    
+    # 检查磁盘空间
+    local required_space=5  # 需要5MB空间
+    local available_space=$(df -m "$CF_DIR" | awk 'NR==2 {print $4}')
+    if [ -n "$available_space" ] && [ "$available_space" -lt "$required_space" ]; then
+        log "ERROR" "磁盘空间不足。需要: ${required_space}MB, 可用: ${available_space}MB"
+        return 1
+    fi
+    
+    # 确保临时目录存在并可写
     TMP_DIR="/tmp/cf_download"
-    mkdir -p "$TMP_DIR"
+    if ! mkdir -p "$TMP_DIR" 2>/dev/null; then
+        TMP_DIR="$CF_DIR/tmp"
+        if ! mkdir -p "$TMP_DIR" 2>/dev/null; then
+            log "ERROR" "无法创建临时目录，请检查权限"
+            return 1
+        fi
+    fi
+    
+    # 检查临时目录权限
+    if [ ! -w "$TMP_DIR" ]; then
+        log "ERROR" "临时目录无写入权限: $TMP_DIR"
+        return 1
+    fi
     
     # 设置临时文件路径
-    TMP_FILE="$TMP_DIR/cfnas.sh.tmp"
-    CF_TMP_FILE="$TMP_DIR/cf.sh.tmp"
+    TMP_FILE="$TMP_DIR/cfnas.sh.tmp.$$"
+    CF_TMP_FILE="$TMP_DIR/cf.sh.tmp.$$"
+    
+    # 清理旧的临时文件
+    trap 'rm -f "$TMP_FILE" "$CF_TMP_FILE"' EXIT
     
     # 确保目标目录存在且有写入权限
     if [ ! -d "$CF_DIR" ]; then
-        mkdir -p "$CF_DIR" || {
-            echo -e "${RED}错误：无法创建目录 $CF_DIR${NC}"
+        if ! mkdir -p "$CF_DIR" 2>/dev/null; then
+            log "ERROR" "无法创建目录: $CF_DIR"
             return 1
-        }
+        fi
+    fi
+    
+    if [ ! -w "$CF_DIR" ]; then
+        log "ERROR" "目录无写入权限: $CF_DIR"
+        return 1
     fi
     
     # 添加重试机制
     local max_retries=3
     local retry_count=0
+    local curl_timeout=30
+    local curl_retry_delay=3
     
-    # 直接使用固定的 GitHub 链接
+    # 下载链接
     local cfnas_url="https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cfnas.sh"
     local cf_url="https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cf.sh"
-    
-    # 备用链接（使用代理）
     local cfnas_backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cfnas.sh"
     local cf_backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cf.sh"
     
     while [ $retry_count -lt $max_retries ]; do
-        echo -e "${BLUE}尝试下载 cfnas.sh (尝试 $((retry_count + 1))/$max_retries)${NC}"
+        log "INFO" "尝试下载 cfnas.sh (尝试 $((retry_count + 1))/$max_retries)"
         
-        # 尝试从所有可用源下载
-        if curl -sSL --connect-timeout 10 "$cfnas_url" -o "$TMP_FILE" || \
-           curl -sSL --connect-timeout 10 "$cfnas_backup_url" -o "$TMP_FILE"; then
+        # 使用 -f 选项防止输出错误页面到文件
+        if curl -sSLf --connect-timeout "$curl_timeout" --retry 3 --retry-delay "$curl_retry_delay" "$cfnas_url" -o "$TMP_FILE" || \
+           curl -sSLf --connect-timeout "$curl_timeout" --retry 3 --retry-delay "$curl_retry_delay" "$cfnas_backup_url" -o "$TMP_FILE"; then
             
-            if [ -s "$TMP_FILE" ] && grep -q "#!/bin/bash" "$TMP_FILE"; then
+            # 验证下载的文件
+            if [ -s "$TMP_FILE" ] && head -n1 "$TMP_FILE" | grep -q "#!/bin/bash"; then
                 # 确保文件以换行符结尾
                 echo "" >> "$TMP_FILE"
                 convert_line_endings "$TMP_FILE"
                 
-                # 使用 cat 而不是 mv 来确保权限问题
-                cat "$TMP_FILE" > "$CF_DIR/cfnas.sh"
-                chmod +x "$CF_DIR/cfnas.sh"
-                log "INFO" "cfnas.sh 下载成功"
-                
-                # 下载 cf.sh
-                echo -e "${BLUE}开始下载 cf.sh...${NC}"
-                if curl -sSL "$cf_url" -o "$CF_TMP_FILE" || \
-                   curl -sSL "$cf_backup_url" -o "$CF_TMP_FILE"; then
+                # 安全地移动文件
+                if cp "$TMP_FILE" "$CF_DIR/cfnas.sh" && chmod +x "$CF_DIR/cfnas.sh"; then
+                    log "INFO" "cfnas.sh 下载成功"
                     
-                    if [ -s "$CF_TMP_FILE" ] && grep -q "#!/bin/bash" "$CF_TMP_FILE"; then
-                        echo "" >> "$CF_TMP_FILE"
-                        convert_line_endings "$CF_TMP_FILE"
-                        cat "$CF_TMP_FILE" > "$CF_DIR/cf.sh"
-                        chmod +x "$CF_DIR/cf.sh"
-                        echo -e "${GREEN}cf.sh 下载成功${NC}"
+                    # 下载 cf.sh
+                    log "INFO" "开始下载 cf.sh..."
+                    if curl -sSLf --connect-timeout "$curl_timeout" "$cf_url" -o "$CF_TMP_FILE" || \
+                       curl -sSLf --connect-timeout "$curl_timeout" "$cf_backup_url" -o "$CF_TMP_FILE"; then
                         
-                        # 清理临时文件
-                        rm -f "$TMP_FILE" "$CF_TMP_FILE"
-                        return 0
+                        if [ -s "$CF_TMP_FILE" ] && head -n1 "$CF_TMP_FILE" | grep -q "#!/bin/bash"; then
+                            echo "" >> "$CF_TMP_FILE"
+                            convert_line_endings "$CF_TMP_FILE"
+                            
+                            if cp "$CF_TMP_FILE" "$CF_DIR/cf.sh" && chmod +x "$CF_DIR/cf.sh"; then
+                                log "INFO" "cf.sh 下载成功"
+                                return 0
+                            else
+                                log "ERROR" "无法保存 cf.sh"
+                            fi
+                        else
+                            log "ERROR" "下载的 cf.sh 文件不完整或格式错误"
+                        fi
+                    else
+                        log "ERROR" "下载 cf.sh 失败"
                     fi
+                else
+                    log "ERROR" "无法保存 cfnas.sh"
                 fi
-                echo -e "${RED}下载 cf.sh 失败或文件无效${NC}"
             else
-                echo -e "${RED}下载的 cfnas.sh 文件不完整或格式错误${NC}"
+                log "ERROR" "下载的 cfnas.sh 文件不完整或格式错误"
             fi
+        else
+            log "ERROR" "下载失败: curl 错误"
         fi
         
         ((retry_count++))
         if [ $retry_count -lt $max_retries ]; then
-            echo -e "${YELLOW}下载失败，等待重试...${NC}"
-            sleep 3
+            local wait_time=$((curl_retry_delay * retry_count))
+            log "WARN" "下载失败，等待 ${wait_time} 秒后重试..."
+            sleep "$wait_time"
         fi
     done
     
-    # 清理临时文件
-    rm -f "$TMP_FILE" "$CF_TMP_FILE"
-    echo -e "${RED}达到最大重试次数，下载失败${NC}"
+    log "ERROR" "达到最大重试次数，下载失败"
     return 1
 }
 
