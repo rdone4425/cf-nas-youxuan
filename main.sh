@@ -55,25 +55,33 @@ download_cfnas() {
     local max_retries=3
     local retry_count=0
     
+    # 直接使用固定的 GitHub 链接
+    local cfnas_url="https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cfnas.sh"
+    local cf_url="https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cf.sh"
+    
+    # 备用链接（使用代理）
+    local cfnas_backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cfnas.sh"
+    local cf_backup_url="https://git.910626.xyz/https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/cf.sh"
+    
     while [ $retry_count -lt $max_retries ]; do
-        if curl -sSL --connect-timeout 10 "https://gitlab.com/rdone4425/ip/-/raw/main/cfnas.sh" -o "$TMP_FILE"; then
-            # 验证下载成功
+        # 尝试直接下载 cfnas.sh
+        if curl -sSL --connect-timeout 10 "$cfnas_url" -o "$TMP_FILE" || \
+           curl -sSL --connect-timeout 10 "$cfnas_backup_url" -o "$TMP_FILE"; then
+            
             if [ -s "$TMP_FILE" ] && grep -q "#!/bin/bash" "$TMP_FILE"; then
-                # 确保文件以换行符结尾
                 echo "" >> "$TMP_FILE"
-                # 转换可能的 DOS 格式为 UNIX 格式
                 convert_line_endings "$TMP_FILE"
-                # 移动到最终位置
                 mv "$TMP_FILE" "$CF_DIR/cfnas.sh"
                 chmod +x "$CF_DIR/cfnas.sh"
                 log "INFO" "cfnas.sh 下载成功"
                 
                 # 下载 cf.sh
                 echo -e "${BLUE}开始下载 cf.sh...${NC}"
-                if curl -sSL "https://gitlab.com/rdone4425/ip/-/raw/main/cf.sh" -o "$CF_TMP_FILE"; then
+                if curl -sSL "$cf_url" -o "$CF_TMP_FILE" || \
+                   curl -sSL "$cf_backup_url" -o "$CF_TMP_FILE"; then
+                    
                     if [ -s "$CF_TMP_FILE" ] && grep -q "#!/bin/bash" "$CF_TMP_FILE"; then
                         echo "" >> "$CF_TMP_FILE"
-                        # 转换可能的 DOS 格式为 UNIX 格式
                         convert_line_endings "$CF_TMP_FILE"
                         mv "$CF_TMP_FILE" "$CF_DIR/cf.sh"
                         chmod +x "$CF_DIR/cf.sh"
@@ -90,13 +98,14 @@ download_cfnas() {
             else
                 rm -f "$TMP_FILE"
                 echo -e "${RED}下载的 cfnas.sh 文件不完整或格式错误${NC}"
-                return 1
             fi
         fi
         
         ((retry_count++))
-        echo -e "${YELLOW}下载失败，尝试重试 ($retry_count/$max_retries)${NC}"
-        sleep 2
+        if [ $retry_count -lt $max_retries ]; then
+            echo -e "${YELLOW}下载失败，等待重试 ($retry_count/$max_retries)...${NC}"
+            sleep 2
+        fi
     done
     
     echo -e "${RED}达到最大重试次数，下载失败${NC}"
