@@ -17,8 +17,8 @@
 
 #### 方法一：快速安装（推荐）
 
-```bash
 # 一键安装运行
+```bash
 bash <(curl -Ls https://raw.githubusercontent.com/rdone4425/cf-nas-youxuan/main/main.sh)
 ```
 
